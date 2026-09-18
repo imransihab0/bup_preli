@@ -403,7 +403,7 @@ inside that window.
 
 ```
 imransihab0/gridwise-api:1.0.0
-imransihab0/gridwise-api@sha256:48d4e1f1e6f39038f65ba41c564ea38c1380379563f29c36317e88f71f7820cd
+imransihab0/gridwise-api@sha256:4fa1da5e93ded54f39ce0085721a893c65d576921098e6e1aa9471cfffd77b9e
 ```
 
 Verified anonymously pullable — no credentials needed.
