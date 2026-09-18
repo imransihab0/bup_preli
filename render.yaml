@@ -13,6 +13,8 @@ services:
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
+      # Also pinned in .python-version, which Render reads even for services
+      # created manually rather than from this blueprint. Keep the two in sync.
       - key: PYTHON_VERSION
         value: "3.12.7"
       - key: OPENAI_API_KEY

@@ -280,9 +280,16 @@ The repository includes `render.yaml`, so the service can be created as a Bluepr
 
 Manual setup instead of the blueprint:
 
+- Language / runtime: **Python 3**
 - Build command: `pip install -r requirements.txt`
 - Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 - Health check path: `/health`
+
+> **Python version matters.** `.python-version` pins 3.12.7. On Python 3.14 the
+> pinned `pydantic-core` has no prebuilt wheel, so pip falls back to compiling it
+> with Rust and the build fails on Render's read-only filesystem. If you create
+> the service manually rather than from the blueprint, also set `PYTHON_VERSION`
+> to `3.12.7` in the Environment tab.
 
 > **Free-tier note:** Render's free instances sleep after inactivity and can take
 > ~50 s to wake. Hit `/health` shortly before judging begins, or use a paid
