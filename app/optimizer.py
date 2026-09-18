@@ -44,6 +44,12 @@ def _index(block: int, hour: int) -> int:
     return block * N + hour
 
 
+# Penalty weight for a unit of directive violation in the minimum-violation
+# solve. It only has to dominate any cost saving a violation could buy; total
+# daily cost is O(10^5), so this is several orders clear.
+VIOLATION_PENALTY = 1e6
+
+
 def solve(
     hours: list[HourInput],
     battery: BatteryInput,
@@ -116,6 +122,112 @@ def solve(
         raise InfeasibleScheduleError(result.message or "linear program did not converge")
 
     return _materialize(result.x, hours, battery, constraints)
+
+
+def solve_minimum_violation(
+    hours: list[HourInput],
+    battery: BatteryInput,
+    constraints: CompiledConstraints,
+) -> tuple[Schedule, float]:
+    """Solve an over-constrained scenario by violating as little as possible.
+
+    Organizer scoring scenarios are guaranteed feasible (S05.1), so this only
+    runs when an interpretation is over-constrained or a scenario is genuinely
+    impossible - for instance a grid cap below `demand - solar - max_discharge`,
+    which no schedule can meet because the hourly discharge limit binds.
+
+    Rather than discarding the directives wholesale, the numeric ones (grid cap
+    and battery reserve) gain a heavily penalised slack variable. The solver
+    then keeps every hour it CAN satisfy and exceeds only where physics forces
+    it, by the smallest possible margin. Physical rules stay hard: energy
+    balance, battery bounds, rate limits, effective solar, and the no-charge /
+    no-discharge windows are never relaxed, because breaking those would trade
+    a directive violation for a validity failure - and validity is checked on
+    every case, not just the constrained ones.
+
+    Returns the schedule and the total violation, in kWh.
+    """
+    by_hour = {h.hour: h for h in hours}
+    capped = [h for h in HOURS if not math.isinf(constraints.max_grid[h])]
+    reserved = [
+        h for h in HOURS
+        if constraints.min_energy_after[h] > float(battery.minimum_energy_kwh)
+    ]
+    # Layout: the usual 4N, then one slack per capped hour, then one per
+    # reserved hour.
+    n_slack = len(capped) + len(reserved)
+    width = 4 * N + n_slack
+    cap_slack = {hour: 4 * N + i for i, hour in enumerate(capped)}
+    res_slack = {hour: 4 * N + len(capped) + i for i, hour in enumerate(reserved)}
+
+    cost = np.zeros(width)
+    for hour in HOURS:
+        cost[_index(GRID, hour)] = float(by_hour[hour].tariff_bdt_per_kwh)
+    for column in list(cap_slack.values()) + list(res_slack.values()):
+        cost[column] = VIOLATION_PENALTY
+
+    a_eq = np.zeros((N + 1, width))
+    b_eq = np.zeros(N + 1)
+    for hour in HOURS:
+        a_eq[hour, _index(GRID, hour)] = 1.0
+        a_eq[hour, _index(SOLAR, hour)] = 1.0
+        a_eq[hour, _index(DISCHARGE, hour)] = 1.0
+        a_eq[hour, _index(CHARGE, hour)] = -1.0
+        b_eq[hour] = float(by_hour[hour].demand_kwh)
+    for hour in HOURS:
+        a_eq[N, _index(CHARGE, hour)] = 1.0
+        a_eq[N, _index(DISCHARGE, hour)] = -1.0
+
+    rows: list[np.ndarray] = []
+    limits: list[float] = []
+    running = np.zeros(width)
+    initial = float(battery.initial_energy_kwh)
+    for hour in HOURS:
+        running[_index(CHARGE, hour)] = 1.0
+        running[_index(DISCHARGE, hour)] = -1.0
+
+        rows.append(running.copy())
+        limits.append(float(battery.capacity_kwh) - initial)
+
+        # Base minimum stays hard; a directive reserve above it may slip.
+        floor = running.copy() * -1.0
+        if hour in res_slack:
+            floor[res_slack[hour]] = -1.0
+        rows.append(floor)
+        limits.append(initial - constraints.min_energy_after[hour])
+
+        if hour in cap_slack:
+            cap_row = np.zeros(width)
+            cap_row[_index(GRID, hour)] = 1.0
+            cap_row[cap_slack[hour]] = -1.0
+            rows.append(cap_row)
+            limits.append(max(constraints.max_grid[hour], 0.0))
+
+    bounds: list[tuple[float, float | None]] = []
+    bounds.extend((0.0, None) for _ in HOURS)                       # grid
+    bounds.extend((0.0, max(constraints.effective_solar[h], 0.0)) for h in HOURS)
+    for hour in HOURS:
+        bounds.append(
+            (0.0, float(battery.max_charge_kwh_per_hour) if constraints.charge_allowed[hour] else 0.0)
+        )
+    for hour in HOURS:
+        bounds.append(
+            (0.0, float(battery.max_discharge_kwh_per_hour)
+             if constraints.discharge_allowed[hour] else 0.0)
+        )
+    bounds.extend((0.0, None) for _ in range(n_slack))
+
+    result = linprog(
+        cost, A_ub=np.array(rows), b_ub=limits, A_eq=a_eq, b_eq=b_eq,
+        bounds=bounds, method="highs",
+    )
+    if not result.success:
+        raise InfeasibleScheduleError(
+            result.message or "infeasible even with directive slack"
+        )
+
+    violation = float(sum(result.x[c] for c in list(cap_slack.values()) + list(res_slack.values())))
+    return _materialize(result.x, hours, battery, constraints), violation
 
 
 def _materialize(

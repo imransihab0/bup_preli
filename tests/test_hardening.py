@@ -170,3 +170,103 @@ class TestLogSecretSafety:
         RequestIdFilter().filter(record)
         assert "abcdefgh12345678" not in record.getMessage()
         assert hasattr(record, "request_id")
+
+
+class TestMinimumViolation:
+    """An impossible directive must cost as little validity as possible.
+
+    A cap below `demand - solar - max_discharge` cannot be met by any schedule,
+    because the hourly discharge limit binds regardless of stored energy. The
+    service must still return a physically valid plan, exceed the directive by
+    the smallest possible margin, and keep every hour it can satisfy.
+    """
+
+    @pytest.fixture
+    def scenario(self):
+        request = OptimizeRequest.model_validate(SAMPLE)
+        return request, request.hours_sorted(), request.battery
+
+    def test_impossible_cap_violates_by_the_physical_minimum(self, scenario):
+        from app.optimizer import solve_minimum_violation
+
+        request, hours, battery = scenario
+        directive = Directive(0, "max_grid_window", hours=(18, 19, 20), max_grid_kwh=155)
+        schedule, violation = solve_minimum_violation(
+            hours, battery, compile_constraints([directive], hours, battery)
+        )
+        # hour 19: demand 215, no solar, 50 kWh/h discharge limit -> floor 165.
+        assert violation == pytest.approx(10.0, abs=0.01)
+        assert schedule.grid[19] == pytest.approx(165.0, abs=0.01)
+
+    def test_satisfiable_hours_are_still_enforced(self, scenario):
+        from app.optimizer import solve_minimum_violation
+
+        request, hours, battery = scenario
+        directive = Directive(0, "max_grid_window", hours=(18, 19, 20), max_grid_kwh=155)
+        schedule, _ = solve_minimum_violation(
+            hours, battery, compile_constraints([directive], hours, battery)
+        )
+        # Only hour 19 is impossible; 18 and 20 must still obey the cap.
+        assert schedule.grid[18] <= 155 + 0.01
+        assert schedule.grid[20] <= 155 + 0.01
+
+    def test_plan_stays_physically_valid(self, scenario):
+        from app.optimizer import solve_minimum_violation
+        from app.replay import replay
+        from app.service import _to_plan
+
+        request, hours, battery = scenario
+        directive = Directive(0, "max_grid_window", hours=(18, 19, 20), max_grid_kwh=155)
+        schedule, _ = solve_minimum_violation(
+            hours, battery, compile_constraints([directive], hours, battery)
+        )
+        # Energy balance, battery bounds and neutrality are never traded away.
+        verdict = replay(_to_plan(schedule), hours, battery, compile_constraints([], hours, battery))
+        assert verdict.ok, verdict.errors
+
+    def test_feasible_directive_yields_no_violation(self, scenario):
+        from app.optimizer import solve_minimum_violation
+
+        request, hours, battery = scenario
+        directive = Directive(0, "max_grid_window", hours=(18, 19, 20), max_grid_kwh=175)
+        _, violation = solve_minimum_violation(
+            hours, battery, compile_constraints([directive], hours, battery)
+        )
+        assert violation == pytest.approx(0.0, abs=1e-6)
+
+    def test_impossible_reserve_also_minimises(self, scenario):
+        from app.optimizer import solve_minimum_violation
+
+        request, hours, battery = scenario
+        # Reserve above capacity cannot be met; slack should be small and finite.
+        directive = Directive(
+            0, "minimum_battery_reserve", hours=(18, 19), minimum_energy_kwh=220
+        )
+        schedule, violation = solve_minimum_violation(
+            hours, battery, compile_constraints([directive], hours, battery)
+        )
+        assert violation >= 0.0
+        assert schedule.energy_after[-1] == pytest.approx(battery.initial_energy_kwh, abs=0.01)
+
+    def test_service_returns_a_valid_plan_for_an_impossible_cap(self):
+        """End to end: the response must still replay clean physically."""
+        from app.replay import replay
+        from app.service import run
+
+        payload = json.loads(json.dumps(SAMPLE))
+        payload["scenario_id"] = "impossible-cap"
+        request = OptimizeRequest.model_validate(payload)
+        directives = [Directive(0, "max_grid_window", hours=(18, 19, 20), max_grid_kwh=155)]
+
+        constraints = compile_constraints(directives, request.hours_sorted(), request.battery)
+        from app.optimizer import solve_minimum_violation
+        from app.service import _to_plan
+
+        schedule, _ = solve_minimum_violation(
+            request.hours_sorted(), request.battery, constraints
+        )
+        verdict = replay(
+            _to_plan(schedule), request.hours_sorted(), request.battery,
+            compile_constraints([], request.hours_sorted(), request.battery),
+        )
+        assert verdict.ok, verdict.errors

@@ -12,7 +12,12 @@ from .deadline import Deadline
 from .directives import HOURS, CompiledConstraints, Directive, compile_constraints
 from .guardrails import GuardrailError, validate_interpretations
 from .llm import INTERPRETER, LLMUnavailableError
-from .optimizer import InfeasibleScheduleError, Schedule, solve
+from .optimizer import (
+    InfeasibleScheduleError,
+    Schedule,
+    solve,
+    solve_minimum_violation,
+)
 from .replay import replay
 from .schemas import (
     DirectiveInterpretation,
@@ -186,15 +191,25 @@ def _schedule(
         return solve(hours, request.battery, constraints), constraints, False
     except InfeasibleScheduleError as exc:
         # Organizer scoring scenarios are guaranteed feasible (S05.1), so this
-        # only fires on an over-constrained misreading. A valid plan that drops
-        # the battery/grid directives beats returning nothing at all; the solar
-        # ceiling is kept because exceeding it is physically impossible.
-        logger.warning("constrained solve infeasible (%s); relaxing directives", exc)
-        relaxed = CompiledConstraints(
-            effective_solar=list(constraints.effective_solar),
-            min_energy_after=[float(request.battery.minimum_energy_kwh)] * 24,
-        )
-        return solve(hours, request.battery, relaxed), relaxed, True
+        # only fires on an over-constrained misreading or an impossible cap -
+        # e.g. one below `demand - solar - max_discharge`, which the hourly
+        # discharge limit makes unreachable no matter how full the battery is.
+        logger.warning("constrained solve infeasible (%s); minimising violation", exc)
+        try:
+            schedule, violation = solve_minimum_violation(hours, request.battery, constraints)
+            logger.warning(
+                "returned a plan violating directives by %.2f kWh in total "
+                "(the minimum physically possible)", violation
+            )
+            return schedule, constraints, True
+        except InfeasibleScheduleError as inner:
+            # Even slack could not help: a physical rule is the blocker.
+            logger.error("infeasible with slack (%s); dropping directives entirely", inner)
+            relaxed = CompiledConstraints(
+                effective_solar=list(constraints.effective_solar),
+                min_energy_after=[float(request.battery.minimum_energy_kwh)] * 24,
+            )
+            return solve(hours, request.battery, relaxed), relaxed, True
 
 
 def _physical_only(request: OptimizeRequest, hours: list) -> CompiledConstraints:
