@@ -40,10 +40,15 @@ def _env_int(name: str, default: int) -> int:
 class Settings:
     api_key: str | None
     model: str
+    escalation_model: str
     reasoning_effort: str
     llm_timeout: float
     llm_max_retries: int
     disable_llm: bool
+    request_budget: float
+    escalation_enabled: bool
+    hedging_enabled: bool
+    cache_size: int
 
     @property
     def llm_enabled(self) -> bool:
@@ -55,10 +60,17 @@ def load_settings() -> Settings:
         api_key=os.environ.get("OPENAI_API_KEY") or None,
         model=os.environ.get("GRIDWISE_MODEL") or "gpt-5.6-luna",
         # Empty string omits the parameter entirely.
+        escalation_model=os.environ.get("GRIDWISE_ESCALATION_MODEL") or "gpt-5.6-terra",
         reasoning_effort=os.environ.get("GRIDWISE_REASONING_EFFORT", "low"),
         llm_timeout=_env_float("GRIDWISE_LLM_TIMEOUT", 12.0),
         llm_max_retries=_env_int("GRIDWISE_LLM_MAX_RETRIES", 1),
         disable_llm=os.environ.get("GRIDWISE_DISABLE_LLM", "0") == "1",
+        # Total wall-clock budget for one request. The judge fails anything over
+        # 30 s, so this leaves comfortable headroom for the optimizer and I/O.
+        request_budget=_env_float("GRIDWISE_REQUEST_BUDGET", 20.0),
+        escalation_enabled=os.environ.get("GRIDWISE_ESCALATION", "1") == "1",
+        hedging_enabled=os.environ.get("GRIDWISE_HEDGING", "1") == "1",
+        cache_size=_env_int("GRIDWISE_CACHE_SIZE", 256),
     )
 
 

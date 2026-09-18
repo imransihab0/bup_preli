@@ -1,5 +1,11 @@
-# Fallback execution path for organizers. No secrets are baked in -
-# OPENAI_API_KEY is supplied at run time with `docker run -e`.
+# Fallback execution path for organizers.
+#
+# No secrets are baked in: OPENAI_API_KEY is supplied at run time with
+# `docker run -e`. .dockerignore additionally keeps .env out of the build
+# context entirely, so it cannot be copied in by accident.
+#
+# Python is pinned to 3.12 to match .python-version. On 3.14 the pinned
+# pydantic-core has no prebuilt wheel and pip falls back to a Rust build.
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -22,8 +28,9 @@ USER gridwise
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request,os,sys; sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",8000)}/health', timeout=4).status==200 else 1)"
+COPY --chown=gridwise:gridwise scripts/healthcheck.py /app/healthcheck.py
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD ["python", "/app/healthcheck.py"]
 
 # Shell form so $PORT expands; Render injects it, local runs default to 8000.
 CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT}

@@ -1,0 +1,17 @@
+# Never let credentials or local state into the build context.
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+.git/
+.gitignore
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.DS_Store
+tests/
+requirements-dev.txt
+BUP_CSE_FEST_2026_Participant_Docs/
+*.md
+!README.md

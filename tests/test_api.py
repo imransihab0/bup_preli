@@ -137,6 +137,17 @@ class TestRequestValidation:
         assert response.status_code == 422
         assert response.json()["error"] == "invalid_request"
 
+    def test_error_responses_carry_a_request_id(self):
+        response = client.post("/optimize-energy", json={"scenario_id": "X"})
+        assert response.json()["request_id"]
+        assert response.headers["x-request-id"]
+
+    def test_supplied_request_id_is_echoed(self):
+        response = client.post(
+            "/optimize-energy", json=SAMPLE, headers={"x-request-id": "trace-me-123"}
+        )
+        assert response.headers["x-request-id"] == "trace-me-123"
+
     def test_error_responses_leak_nothing_sensitive(self):
         response = client.post("/optimize-energy", json={"scenario_id": "X"})
         text = response.text.lower()

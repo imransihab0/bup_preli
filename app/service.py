@@ -6,7 +6,9 @@ import logging
 from dataclasses import dataclass
 
 from . import fallback_parser
-from .config import OUTPUT_PRECISION
+from .cache import InterpretationCache, interpretation_key
+from .config import OUTPUT_PRECISION, SETTINGS
+from .deadline import Deadline
 from .directives import HOURS, CompiledConstraints, Directive, compile_constraints
 from .guardrails import GuardrailError, validate_interpretations
 from .llm import INTERPRETER, LLMUnavailableError
@@ -20,6 +22,11 @@ from .schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+CACHE = InterpretationCache(maxsize=SETTINGS.cache_size)
+
+# Time one more interpretation attempt is assumed to need.
+ESTIMATED_RETRY_SECONDS = 6.0
 
 TYPE_LABELS = {
     "solar_reduction": "the reduced solar availability",
@@ -35,12 +42,20 @@ class PipelineOutcome:
     response: OptimizeResponse
     interpreter: str
     degraded: bool
+    cached: bool = False
+    hedged: bool = False
+    elapsed: float = 0.0
 
 
 def run(request: OptimizeRequest) -> PipelineOutcome:
+    deadline = Deadline.start(SETTINGS.request_budget)
     hours = request.hours_sorted()
-    directives, interpreter = _interpret(request)
-    constraints = compile_constraints(directives, hours, request.battery)
+
+    directives, interpreter, cached = _interpret(request, deadline)
+    hedged = any(d.hedge_hours for d in directives) and SETTINGS.hedging_enabled
+    constraints = compile_constraints(
+        directives, hours, request.battery, hedging=SETTINGS.hedging_enabled
+    )
 
     schedule, active, degraded = _schedule(request, constraints)
     plan = _to_plan(schedule)
@@ -57,6 +72,10 @@ def run(request: OptimizeRequest) -> PipelineOutcome:
         verdict = replay(plan, hours, request.battery, active)
         degraded = True
 
+    if hedged:
+        logger.info("applied ambiguity hedging to %d directive(s)",
+                    sum(1 for d in directives if d.hedge_hours))
+
     response = OptimizeResponse(
         scenario_id=request.scenario_id,
         directive_interpretation=[_to_interpretation(d) for d in directives],
@@ -66,35 +85,47 @@ def run(request: OptimizeRequest) -> PipelineOutcome:
         peak_grid_kwh=round(verdict.peak_grid_kwh, OUTPUT_PRECISION),
         plan_summary=_summarize(directives, verdict.total_cost_bdt, verdict.peak_grid_kwh),
     )
-    return PipelineOutcome(response=response, interpreter=interpreter, degraded=degraded)
+    return PipelineOutcome(
+        response=response,
+        interpreter=interpreter,
+        degraded=degraded,
+        cached=cached,
+        hedged=hedged,
+        elapsed=deadline.elapsed,
+    )
 
 
 # --------------------------------------------------------------------------- #
 # Interpretation
 # --------------------------------------------------------------------------- #
-def _interpret(request: OptimizeRequest) -> tuple[list[Directive], str]:
-    """Run the model, validate what it returned, and fall back only if forced."""
+def _interpret(
+    request: OptimizeRequest, deadline: Deadline
+) -> tuple[list[Directive], str, bool]:
+    """Run the model, validate what it returned, and fall back only if forced.
+
+    Returns the validated directives, a label for which path produced them, and
+    whether the result came from cache.
+    """
     note_count = len(request.operator_notes)
+    key = interpretation_key(request.operator_notes, request.battery.model_dump())
+
+    cached = CACHE.get(key)
+    if cached is not None:
+        logger.info("interpretation cache hit")
+        return cached, "cache", True
 
     if INTERPRETER.enabled:
-        try:
-            raw = INTERPRETER.interpret(request.operator_notes, request.battery)
-            return validate_interpretations(raw, note_count, request.battery), "llm"
-        except GuardrailError as exc:
-            # The model produced something we refuse to trust. One retry gives
-            # it a chance to self-correct before we degrade.
-            logger.warning("guardrails rejected model output: %s", exc)
-            try:
-                raw = INTERPRETER.interpret(request.operator_notes, request.battery)
-                return validate_interpretations(raw, note_count, request.battery), "llm-retry"
-            except (GuardrailError, LLMUnavailableError) as retry_exc:
-                logger.warning("retry also failed: %s", retry_exc)
-        except LLMUnavailableError as exc:
-            logger.warning("model unavailable: %s", exc)
+        directives = _interpret_with_model(request, note_count, deadline)
+        if directives is not None:
+            CACHE.put(key, directives[0])
+            return directives[0], directives[1], False
 
     try:
         raw = fallback_parser.interpret(request.operator_notes, request.battery.model_dump())
-        return validate_interpretations(raw, note_count, request.battery), "deterministic-fallback"
+        directives = validate_interpretations(raw, note_count, request.battery)
+        # Deliberately not cached: the fallback runs during a model outage, and
+        # caching its weaker reading would outlive the outage that caused it.
+        return directives, "deterministic-fallback", False
     except GuardrailError as exc:
         logger.error("fallback parser produced invalid directives: %s", exc)
 
@@ -109,7 +140,38 @@ def _interpret(request: OptimizeRequest) -> tuple[list[Directive], str]:
             for index in range(note_count)
         ],
         "none",
+        False,
     )
+
+
+def _interpret_with_model(
+    request: OptimizeRequest, note_count: int, deadline: Deadline
+) -> tuple[list[Directive], str] | None:
+    """One model attempt, with a budget-aware retry. None means fall back."""
+    try:
+        result = INTERPRETER.interpret(request.operator_notes, request.battery, deadline)
+        directives = validate_interpretations(result.entries, note_count, request.battery)
+        return directives, "llm-escalated" if result.escalated else "llm"
+    except GuardrailError as exc:
+        logger.warning("guardrails rejected model output: %s", exc)
+    except LLMUnavailableError as exc:
+        logger.warning("model unavailable: %s", exc)
+        return None
+
+    # A guardrail rejection is worth one retry - but only if the budget can
+    # still absorb it. Spending the remaining time and then timing out scores
+    # worse than answering now on the deterministic path.
+    if not deadline.allows(ESTIMATED_RETRY_SECONDS):
+        logger.info("skipping guardrail retry: %.1fs left in budget", deadline.remaining)
+        return None
+
+    try:
+        result = INTERPRETER.interpret(request.operator_notes, request.battery, deadline)
+        directives = validate_interpretations(result.entries, note_count, request.battery)
+        return directives, "llm-retry"
+    except (GuardrailError, LLMUnavailableError) as exc:
+        logger.warning("retry also failed: %s", exc)
+        return None
 
 
 # --------------------------------------------------------------------------- #

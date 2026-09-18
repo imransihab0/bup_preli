@@ -78,6 +78,28 @@ services" are all minimum_battery_reserve. "Import must not exceed X", "grid
 intake stays at or below X", "feeder/transformer/substation limit of X" are all
 max_grid_window.
 
+## Confidence and ambiguity
+
+Two extra fields exist for the rare note that genuinely supports more than one
+reading. Use them sparingly - over-reporting ambiguity makes the schedule more
+expensive than it needs to be.
+
+- confidence: "high" for any note you can read confidently, which is almost all
+  of them. "low" ONLY when a different directive type or a materially different
+  number is genuinely defensible.
+- alternate_hours: leave EMPTY unless the time window itself is ambiguous. Fill
+  it only when a reasonable reader could pick a different set of hours - for
+  example a note that says "through 3 PM" (which could include hour 15) or one
+  that gives no clear end. Put the hours of that other reading here. Your best
+  reading still goes in `hours`.
+
+Examples:
+  "from 1 PM to 3 PM"            -> hours [13,14], alternate_hours [], high
+  "until 3 PM inclusive"         -> hours [13,14,15], alternate_hours [13,14], high
+  "through 3 PM"                 -> hours [13,14], alternate_hours [13,14,15], low
+  "in the afternoon"             -> best guess in hours, wider span in
+                                    alternate_hours, low
+
 Return one object per note, in the order the notes were given, with note_index
 matching the note's zero-based position. Keep each explanation to one short
 sentence.

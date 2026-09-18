@@ -63,6 +63,21 @@ def _normalize_hours(raw: Any, label: str) -> tuple[int, ...]:
     return tuple(sorted(hours))
 
 
+def _normalize_optional_hours(raw: Any, label: str) -> tuple[int, ...]:
+    """Alternate-reading hours. Absent or empty is the normal case.
+
+    Invalid content here is discarded rather than fatal: this field only widens
+    optimizer constraints and never affects what gets reported, so a malformed
+    value must not cost an otherwise-good interpretation.
+    """
+    if raw in (None, [], ()):
+        return ()
+    try:
+        return _normalize_hours(raw, label)
+    except GuardrailError:
+        return ()
+
+
 def validate_directive(raw: dict[str, Any], note_index: int, battery: BatteryInput) -> Directive:
     """Validate one raw model interpretation into a trusted `Directive`."""
     label = f"note {note_index}"
@@ -86,6 +101,7 @@ def validate_directive(raw: dict[str, Any], note_index: int, battery: BatteryInp
         )
 
     hours = _normalize_hours(raw.get("hours"), label)
+    hedge_hours = _normalize_optional_hours(raw.get("alternate_hours"), label)
     factor = minimum_energy = max_grid = None
 
     if directive_type == "solar_reduction":
@@ -115,6 +131,7 @@ def validate_directive(raw: dict[str, Any], note_index: int, battery: BatteryInp
         minimum_energy_kwh=minimum_energy,
         max_grid_kwh=max_grid,
         explanation=explanation.strip() or f"Interpreted as {directive_type}.",
+        hedge_hours=hedge_hours,
     )
 
 

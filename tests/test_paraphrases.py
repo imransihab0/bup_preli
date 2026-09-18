@@ -34,8 +34,8 @@ def test_note_resolves_to_expected_directive(case):
     from app.schemas import BatteryInput
 
     battery = BatteryInput.model_validate(SUITE["battery"])
-    raw = INTERPRETER.interpret([case["note"]], battery)
-    directive = validate_interpretations(raw, 1, battery)[0]
+    result = INTERPRETER.interpret([case["note"]], battery)
+    directive = validate_interpretations(result.entries, 1, battery)[0]
     expected = case["expect"]
 
     assert directive.directive_type == expected["directive_type"]

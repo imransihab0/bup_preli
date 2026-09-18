@@ -13,13 +13,16 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from .config import SETTINGS
-from .schemas import OptimizeRequest, OptimizeResponse
-from .service import run
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+from .logging_utils import (
+    configure as configure_logging,
+    get_request_id,
+    new_request_id,
+    set_request_id,
 )
+from .schemas import OptimizeRequest, OptimizeResponse
+from .service import CACHE, run
+
+configure_logging(logging.INFO)
 logger = logging.getLogger("gridwise")
 
 # Starlette renamed the 422 constant; the numeric code is stable across versions.
@@ -29,10 +32,14 @@ HTTP_422 = 422
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info(
-        "GridWise ready | model=%s | llm_enabled=%s | timeout=%.1fs",
+        "GridWise ready | model=%s | escalation=%s | llm_enabled=%s | "
+        "budget=%.0fs | hedging=%s | cache=%d",
         SETTINGS.model,
+        SETTINGS.escalation_model if SETTINGS.escalation_enabled else "off",
         SETTINGS.llm_enabled,
-        SETTINGS.llm_timeout,
+        SETTINGS.request_budget,
+        SETTINGS.hedging_enabled,
+        SETTINGS.cache_size,
     )
     yield
 
@@ -56,6 +63,16 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.middleware("http")
+async def attach_request_id(request: Request, call_next):
+    """One id per request, on every log line and every error response."""
+    request_id = request.headers.get("x-request-id") or new_request_id()
+    set_request_id(request_id)
+    response = await call_next(request)
+    response.headers["x-request-id"] = request_id
+    return response
+
+
 @app.post("/optimize-energy", response_model=OptimizeResponse)
 def optimize_energy(payload: dict) -> JSONResponse:
     started = time.perf_counter()
@@ -72,6 +89,7 @@ def optimize_energy(payload: dict) -> JSONResponse:
                 "error": "invalid_request",
                 "detail": "Request does not match the required schema.",
                 "violations": _summarize_violations(exc),
+                "request_id": get_request_id(),
             },
         )
 
@@ -82,17 +100,27 @@ def optimize_energy(payload: dict) -> JSONResponse:
         logger.exception("optimization failed for scenario %s", request.scenario_id)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "internal_error", "detail": "Failed to produce a schedule."},
+            content={
+                "error": "internal_error",
+                "detail": "Failed to produce a schedule.",
+                "request_id": get_request_id(),
+            },
         )
 
     elapsed_ms = (time.perf_counter() - started) * 1000
     logger.info(
-        "scenario=%s interpreter=%s degraded=%s cost=%.2f latency_ms=%.0f",
+        "scenario=%s interpreter=%s cached=%s hedged=%s degraded=%s "
+        "cost=%.2f peak=%.2f latency_ms=%.0f cache=%d/%d",
         request.scenario_id,
         outcome.interpreter,
+        outcome.cached,
+        outcome.hedged,
         outcome.degraded,
         outcome.response.total_cost_bdt,
+        outcome.response.peak_grid_kwh,
         elapsed_ms,
+        CACHE.hits,
+        CACHE.hits + CACHE.misses,
     )
     return JSONResponse(status_code=status.HTTP_200_OK, content=outcome.response.model_dump())
 
@@ -103,7 +131,11 @@ async def malformed_body(_: Request, exc: RequestValidationError) -> JSONRespons
     logger.info("rejected malformed request body")
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
-        content={"error": "malformed_request", "detail": "Request body is not valid JSON."},
+        content={
+            "error": "malformed_request",
+            "detail": "Request body is not valid JSON.",
+            "request_id": get_request_id(),
+        },
     )
 
 
@@ -112,7 +144,11 @@ async def unhandled(_: Request, exc: Exception) -> JSONResponse:
     logger.exception("unhandled error")
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"error": "internal_error", "detail": "Unexpected server error."},
+        content={
+            "error": "internal_error",
+            "detail": "Unexpected server error.",
+            "request_id": get_request_id(),
+        },
     )
 
 

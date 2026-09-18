@@ -13,6 +13,7 @@ import httpx2
 import openai
 import pytest
 
+from app.deadline import Deadline
 from app.llm import (
     InterpretationBatch,
     LLMUnavailableError,
@@ -67,6 +68,10 @@ class _StubClient:
     def __init__(self, responses):
         self.responses = responses
 
+    def with_options(self, **_kwargs):
+        # The adapter scopes each call's timeout to the remaining budget.
+        return self
+
 
 def _interpreter(responses) -> NoteInterpreter:
     interpreter = NoteInterpreter()
@@ -102,8 +107,9 @@ class TestAdapter:
         )
         interpreter = _interpreter(_StubResponses(parsed=batch))
         result = interpreter.interpret(["charger offline 2-4 AM"], battery)
-        assert result[0]["directive_type"] == "no_charge_window"
-        assert result[0]["hours"] == [2, 3]
+        assert result.entries[0]["directive_type"] == "no_charge_window"
+        assert result.entries[0]["hours"] == [2, 3]
+        assert result.escalated is False
 
     def test_reasoning_effort_is_sent(self, battery):
         batch = InterpretationBatch(interpretations=[])
@@ -149,3 +155,46 @@ def battery():
         capacity_kwh=200, initial_energy_kwh=100, minimum_energy_kwh=40,
         max_charge_kwh_per_hour=50, max_discharge_kwh_per_hour=50,
     )
+
+
+class TestBudgetAndEscalation:
+    def test_expired_budget_refuses_to_call(self, battery):
+        responses = _StubResponses(parsed=InterpretationBatch(interpretations=[]))
+        interpreter = _interpreter(responses)
+        spent = Deadline(budget=10.0, started=-1e9)  # already long past
+        with pytest.raises(LLMUnavailableError):
+            interpreter.interpret(["note"], battery, spent)
+        assert responses.calls == []
+
+    def test_low_confidence_triggers_escalation(self, battery, monkeypatch):
+        from app import llm
+
+        entry = NoteInterpretation(
+            note_index=0, directive_type="no_charge_window", hours=[2],
+            confidence="low", explanation="ambiguous",
+        )
+        responses = _StubResponses(parsed=InterpretationBatch(interpretations=[entry]))
+        result = _interpreter(responses).interpret(["note"], battery)
+        assert result.escalated is True
+        assert result.model == llm.SETTINGS.escalation_model
+        assert len(responses.calls) == 2
+
+    def test_high_confidence_makes_one_call(self, battery):
+        entry = NoteInterpretation(
+            note_index=0, directive_type="no_op", confidence="high", explanation="x",
+        )
+        responses = _StubResponses(parsed=InterpretationBatch(interpretations=[entry]))
+        result = _interpreter(responses).interpret(["note"], battery)
+        assert result.escalated is False
+        assert len(responses.calls) == 1
+
+    def test_escalation_skipped_when_budget_is_short(self, battery):
+        entry = NoteInterpretation(
+            note_index=0, directive_type="no_op", confidence="low", explanation="x",
+        )
+        responses = _StubResponses(parsed=InterpretationBatch(interpretations=[entry]))
+        # Enough budget for the first call, not for a second.
+        tight = Deadline(budget=4.0, started=Deadline.start(0).started)
+        result = _interpreter(responses).interpret(["note"], battery, tight)
+        assert result.escalated is False
+        assert len(responses.calls) == 1
