@@ -376,6 +376,62 @@
       "expect": {
         "directive_type": "no_op"
       }
+    },
+    {
+      "note": "Limit electricity drawn from the utility to 155 kWh during any of the evening peak hours 6 through 9 PM.",
+      "expect": {
+        "directive_type": "max_grid_window",
+        "hours": [
+          18,
+          19,
+          20
+        ],
+        "max_grid_kwh": 155
+      }
+    },
+    {
+      "note": "Do not charge the battery from 1 PM through 3 PM.",
+      "expect": {
+        "directive_type": "no_charge_window",
+        "hours": [
+          13,
+          14
+        ]
+      }
+    },
+    {
+      "note": "Keep 90 kWh in the battery through the 6 PM to 10 PM peak.",
+      "expect": {
+        "directive_type": "minimum_battery_reserve",
+        "hours": [
+          18,
+          19,
+          20,
+          21
+        ],
+        "minimum_energy_kwh": 90
+      }
+    },
+    {
+      "note": "Solar drops to 30% of forecast across hours 10 through 12.",
+      "expect": {
+        "directive_type": "solar_reduction",
+        "hours": [
+          10,
+          11
+        ],
+        "factor": 0.3
+      }
+    },
+    {
+      "note": "No discharging during the 5-7 PM relay test.",
+      "expect": {
+        "directive_type": "no_discharge_window",
+        "hours": [
+          17,
+          18
+        ]
+      }
     }
   ]
 }

@@ -36,12 +36,21 @@ note into an energy rule.
 Convert clock times to whole hours 0-23 and list every hour the window covers,
 excluding the end hour.
 
+This rule is absolute and applies to EVERY way a range can be written - "to",
+"until", "till", "through", "between X and Y", "from X to Y", "X-Y", "during
+the X to Y window". The end hour is never included, whatever word joins the two
+times. English often reads "6 through 9" as including 9, but for this task it
+does not: "6 PM through 9 PM" is [18, 19, 20], exactly like "6 PM until 9 PM".
+
   "noon until 2 PM"          -> [12, 13]
   "from 1 PM to 3 PM"        -> [13, 14]
   "2 AM until 5 AM"          -> [2, 3, 4]
   "between 11 AM and 2 PM"   -> [11, 12, 13]
   "from 6 PM until 10 PM"    -> [18, 19, 20, 21]
   "13:00 to 15:00"           -> [13, 14]
+  "6 PM through 9 PM"        -> [18, 19, 20]      (end still excluded)
+  "hours 6 through 9 PM"     -> [18, 19, 20]      (end still excluded)
+  "1-3 PM"                   -> [13, 14]
   "from one until three"     -> [13, 14]   (afternoon from context)
   "during hour 9"            -> [9]
   "10 PM until 2 AM"         -> [0, 1, 22, 23]   (wraps midnight; still ascending)
@@ -88,15 +97,15 @@ expensive than it needs to be.
   of them. "low" ONLY when a different directive type or a materially different
   number is genuinely defensible.
 - alternate_hours: leave EMPTY unless the time window itself is ambiguous. Fill
-  it only when a reasonable reader could pick a different set of hours - for
-  example a note that says "through 3 PM" (which could include hour 15) or one
-  that gives no clear end. Put the hours of that other reading here. Your best
-  reading still goes in `hours`.
+  it only when a reasonable reader could pick a different set of hours - a note
+  with no clear end, or one that explicitly says a bound is inclusive. `hours`
+  must ALWAYS follow the end-exclusive rule above; alternate_hours is where the
+  other reading goes, never the other way round.
 
 Examples:
   "from 1 PM to 3 PM"            -> hours [13,14], alternate_hours [], high
+  "1 PM through 3 PM"            -> hours [13,14], alternate_hours [13,14,15], high
   "until 3 PM inclusive"         -> hours [13,14,15], alternate_hours [13,14], high
-  "through 3 PM"                 -> hours [13,14], alternate_hours [13,14,15], low
   "in the afternoon"             -> best guess in hours, wider span in
                                     alternate_hours, low
 
