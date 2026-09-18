@@ -1,0 +1,56 @@
+{
+  "_comment": "Hidden cases paraphrase the same directives. Each entry is a note plus the directive it must resolve to. Extend this file rather than tuning against the public sample wording.",
+  "battery": {
+    "capacity_kwh": 200,
+    "initial_energy_kwh": 100,
+    "minimum_energy_kwh": 40,
+    "max_charge_kwh_per_hour": 50,
+    "max_discharge_kwh_per_hour": 50
+  },
+  "cases": [
+    {"note": "Solar output will drop to about 20% from 1 PM to 3 PM.",
+     "expect": {"directive_type": "solar_reduction", "hours": [13, 14], "factor": 0.2}},
+    {"note": "PV production will fall to roughly 20% between 13:00 and 15:00.",
+     "expect": {"directive_type": "solar_reduction", "hours": [13, 14], "factor": 0.2}},
+    {"note": "Panel washing from one until three will leave roughly one-fifth of normal solar output.",
+     "expect": {"directive_type": "solar_reduction", "hours": [13, 14], "factor": 0.2}},
+    {"note": "Expect an 80% reduction in rooftop solar during the 1-3 PM maintenance window.",
+     "expect": {"directive_type": "solar_reduction", "hours": [13, 14], "factor": 0.2}},
+    {"note": "Cloud cover will leave about half the forecast solar from 10 AM until noon.",
+     "expect": {"directive_type": "solar_reduction", "hours": [10, 11], "factor": 0.5}},
+    {"note": "The array is fully offline for recabling from 9 AM to 11 AM - assume no usable generation.",
+     "expect": {"directive_type": "solar_reduction", "hours": [9, 10], "factor": 0.0}},
+
+    {"note": "Do not charge the battery between 2 PM and 4 PM.",
+     "expect": {"directive_type": "no_charge_window", "hours": [14, 15]}},
+    {"note": "The battery charger will be isolated from 2 AM until 5 AM for electrical maintenance.",
+     "expect": {"directive_type": "no_charge_window", "hours": [2, 3, 4]}},
+    {"note": "Charging circuit unavailable while technicians inspect the charger, 11 AM to 1 PM.",
+     "expect": {"directive_type": "no_charge_window", "hours": [11, 12]}},
+
+    {"note": "Do not discharge the battery from 5 PM until 7 PM during relay testing.",
+     "expect": {"directive_type": "no_discharge_window", "hours": [17, 18]}},
+    {"note": "For protection testing the battery must not discharge from 6 PM until 8 PM.",
+     "expect": {"directive_type": "no_discharge_window", "hours": [18, 19]}},
+
+    {"note": "Keep at least 120 kWh in reserve from 6 PM until 9 PM.",
+     "expect": {"directive_type": "minimum_battery_reserve", "hours": [18, 19, 20], "minimum_energy_kwh": 120}},
+    {"note": "Keep at least 50% of the battery capacity stored from 6 PM until 9 PM for emergency operations.",
+     "expect": {"directive_type": "minimum_battery_reserve", "hours": [18, 19, 20], "minimum_energy_kwh": 100}},
+    {"note": "The data center requires at least 80 kWh to remain in the battery from 6 PM until 10 PM.",
+     "expect": {"directive_type": "minimum_battery_reserve", "hours": [18, 19, 20, 21], "minimum_energy_kwh": 80}},
+
+    {"note": "From 6 PM until 9 PM, campus grid import must not exceed 155 kWh in any hour.",
+     "expect": {"directive_type": "max_grid_window", "hours": [18, 19, 20], "max_grid_kwh": 155}},
+    {"note": "The evening transformer limit is 180 kWh of grid import from 7 PM until 9 PM.",
+     "expect": {"directive_type": "max_grid_window", "hours": [19, 20], "max_grid_kwh": 180}},
+    {"note": "Grid intake must stay at or below 190 kWh from 7 PM until 10 PM while the substation is constrained.",
+     "expect": {"directive_type": "max_grid_window", "hours": [19, 20, 21], "max_grid_kwh": 190}},
+
+    {"note": "The cafeteria menu changes tomorrow.", "expect": {"directive_type": "no_op"}},
+    {"note": "The sports office moved next month's registration deadline.", "expect": {"directive_type": "no_op"}},
+    {"note": "The library is extending book-return hours next week.", "expect": {"directive_type": "no_op"}},
+    {"note": "A seminar room booking was moved to next week.", "expect": {"directive_type": "no_op"}},
+    {"note": "Solar panel cleaning is scheduled for next Saturday from 9 AM to 11 AM.", "expect": {"directive_type": "no_op"}}
+  ]
+}
