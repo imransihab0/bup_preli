@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -17,7 +18,11 @@ DirectiveType = Literal[
 
 BatteryAction = Literal["charge", "discharge", "idle"]
 
-NonNegFloat = Annotated[float, Field(ge=0)]
+NonNegFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+# A tariff may legitimately be zero but never negative or non-finite: NaN or
+# Infinity reach the solver and surface as a 500, and a negative price would
+# make the optimizer buy unlimited grid energy.
+TariffFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 
 
 # --------------------------------------------------------------------------- #
@@ -29,7 +34,7 @@ class HourInput(BaseModel):
     hour: int = Field(ge=0, le=23)
     demand_kwh: NonNegFloat
     solar_kwh: NonNegFloat
-    tariff_bdt_per_kwh: float
+    tariff_bdt_per_kwh: TariffFloat
 
 
 class BatteryInput(BaseModel):

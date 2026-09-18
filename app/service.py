@@ -88,7 +88,9 @@ def run(request: OptimizeRequest) -> PipelineOutcome:
         total_grid_kwh=round(verdict.total_grid_kwh, OUTPUT_PRECISION),
         total_cost_bdt=round(verdict.total_cost_bdt, OUTPUT_PRECISION),
         peak_grid_kwh=round(verdict.peak_grid_kwh, OUTPUT_PRECISION),
-        plan_summary=_summarize(directives, verdict.total_cost_bdt, verdict.peak_grid_kwh),
+        plan_summary=_summarize(
+            directives, verdict.total_cost_bdt, verdict.peak_grid_kwh, degraded=degraded
+        ),
     )
     return PipelineOutcome(
         response=response,
@@ -201,7 +203,11 @@ def _schedule(
                 "returned a plan violating directives by %.2f kWh in total "
                 "(the minimum physically possible)", violation
             )
-            return schedule, constraints, True
+            # The plan knowingly exceeds the directives it could not meet, so it
+            # must be checked against the PHYSICAL rules only. Replaying it
+            # against the strict set would reject it by definition and discard
+            # the very plan this branch exists to produce.
+            return schedule, _physical_only(request, hours), True
         except InfeasibleScheduleError as inner:
             # Even slack could not help: a physical rule is the blocker.
             logger.error("infeasible with slack (%s); dropping directives entirely", inner)
@@ -253,12 +259,21 @@ def _to_interpretation(directive: Directive) -> DirectiveInterpretation:
     )
 
 
-def _summarize(directives: list[Directive], cost: float, peak: float) -> str:
+def _summarize(
+    directives: list[Directive], cost: float, peak: float, degraded: bool = False
+) -> str:
     applied = [d for d in directives if d.applies]
     ignored = len(directives) - len(applied)
 
     clauses: list[str] = []
-    if applied:
+    if applied and degraded:
+        # Never claim a directive was honoured when the plan could not honour it.
+        labels = [TYPE_LABELS.get(d.directive_type, d.directive_type) for d in applied]
+        joined = labels[0] if len(labels) == 1 else f"{', '.join(labels[:-1])} and {labels[-1]}"
+        clauses.append(
+            f"comes as close to {joined} as the battery and demand physically allow"
+        )
+    elif applied:
         labels = [TYPE_LABELS.get(d.directive_type, d.directive_type) for d in applied]
         joined = labels[0] if len(labels) == 1 else f"{', '.join(labels[:-1])} and {labels[-1]}"
         clauses.append(f"honours {joined}")

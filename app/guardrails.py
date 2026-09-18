@@ -159,6 +159,10 @@ def validate_interpretations(
         index = entry.get("note_index", position)
         if isinstance(index, bool) or not isinstance(index, (int, float)):
             raise GuardrailError(f"interpretation entry {position} has a non-numeric note_index")
+        if isinstance(index, float) and not index.is_integer():
+            raise GuardrailError(
+                f"interpretation entry {position} has a fractional note_index {index}"
+            )
         index = int(index)
         if not 0 <= index < note_count:
             raise GuardrailError(f"note_index {index} does not identify an operator note")

@@ -27,7 +27,7 @@ FRACTION_WORDS = {
 
 # Every group inside _TIME is non-capturing so the range regex below can rely on
 # group(1) / group(2) being the two raw time strings.
-_MERIDIEM = r"(?:a\.?m\.?|p\.?m\.?)"
+_MERIDIEM = r"(?:a\.?m\.?|p\.?m\.?|in\s+the\s+(?:morning|afternoon|evening|night))"
 _TIME = (
     rf"(?:(?<!\d)\d{{1,2}}(?::\d{{2}})?(?!\d)\s*{_MERIDIEM}?"
     rf"|{'|'.join(WORD_HOURS)})"
@@ -48,8 +48,16 @@ _REDUCTION = re.compile(
 
 
 def _meridiem_of(token: str) -> str | None:
+    """Normalise both "6 PM" and "6 in the evening" to "am"/"pm"."""
     match = re.search(_MERIDIEM, token, re.IGNORECASE)
-    return match.group(0).replace(".", "").lower() if match else None
+    if not match:
+        return None
+    found = match.group(0).replace(".", "").lower()
+    if "morning" in found:
+        return "am"
+    if "afternoon" in found or "evening" in found or "night" in found:
+        return "pm"
+    return found.strip()
 
 
 def _to_hour(token: str, fallback_meridiem: str | None) -> int | None:
@@ -91,37 +99,59 @@ def _window(text: str) -> list[int]:
     # "6 until 9 PM" and "from one until three": an unqualified end of the
     # range borrows whichever half of the day the other end states, and a range
     # with no meridiem at all reads as campus afternoon.
+    absolute = {"noon", "midnight"}
+    start_absolute = start_raw.strip().lower() in absolute
+    end_absolute = end_raw.strip().lower() in absolute
+
     shared = start_meridiem or end_meridiem
-    end = _to_hour(end_raw, end_meridiem or shared or "pm")
-    start = _to_hour(start_raw, start_meridiem or shared or "pm")
+    end = _to_hour(end_raw, None if end_absolute else (end_meridiem or shared or "pm"))
+    start = _to_hour(start_raw, None if start_absolute else (start_meridiem or shared or "pm"))
     if start is None or end is None:
         return []
 
     if start == end:
         return [start]
+
     span = (end - start) % 24 or 24
-    if span > 12 and start_meridiem is None and start >= 12:
-        # Borrowed "pm" pushed the start past the end; the AM reading is meant.
-        start -= 12
-        span = (end - start) % 24 or 24
+    # A borrowed meridiem can make a window wrap most of the day, which no
+    # operator note means. Prefer whichever correction keeps the window short,
+    # trying the start first - "hours 10 through 12" is a morning window, not a
+    # late-evening one.
+    if span > 12 and start_meridiem is None and not start_absolute and start >= 12:
+        candidate = start - 12
+        if ((end - candidate) % 24 or 24) <= 12:
+            start, span = candidate, (end - candidate) % 24 or 24
+    if span > 12 and end_meridiem is None and not end_absolute:
+        candidate = (end + 12) % 24
+        if candidate != start and ((candidate - start) % 24 or 24) <= 12:
+            end, span = candidate, (candidate - start) % 24 or 24
     return sorted({(start + offset) % 24 for offset in range(span)})
 
 
 def _factor(text: str) -> float | None:
     """Return the usable fraction that REMAINS, per S05.1."""
+    value = _stated_fraction(text)
+    if value is None:
+        lowered = text.lower()
+        if re.search(r"\b(no|zero)\s+(?:usable\s+)?(solar|output|generation|production)\b", lowered):
+            return 0.0
+        return None
+
+    # "reduced by a third" states the LOSS, so the remainder is 1 - value. This
+    # applies to worded fractions exactly as it does to percentages.
+    if _REDUCTION.search(text):
+        value = 1.0 - value
+    return round(min(max(value, 0.0), 1.0), 6)
+
+
+def _stated_fraction(text: str) -> float | None:
     percent = re.search(r"(\d{1,3}(?:\.\d+)?)\s*(?:%|percent)", text, re.IGNORECASE)
     if percent:
-        value = float(percent.group(1)) / 100.0
-        if _REDUCTION.search(text):
-            value = 1.0 - value
-        return min(max(value, 0.0), 1.0)
-
+        return float(percent.group(1)) / 100.0
     lowered = text.lower()
     for phrase, value in FRACTION_WORDS.items():
         if phrase in lowered:
             return value
-    if re.search(r"\b(no|zero)\s+(?:usable\s+)?(solar|output|generation|production)\b", lowered):
-        return 0.0
     return None
 
 
@@ -183,7 +213,7 @@ def _interpret_one(note: str, index: int, battery: dict[str, Any]) -> dict[str, 
     if mentions_discharge and negated:
         return {**base, "directive_type": "no_discharge_window",
                 "explanation": "Battery discharging is unavailable in the listed hours."}
-    if mentions_charge and negated:
+    if (mentions_charge or (mentions_battery and re.search(r"isolat|offline|out of service", lowered))) and negated:
         return {**base, "directive_type": "no_charge_window",
                 "explanation": "Battery charging is unavailable in the listed hours."}
 

@@ -33,6 +33,11 @@ MAX_OUTPUT_TOKENS = 1200
 # whether the budget can still afford an escalation or a retry.
 ESTIMATED_CALL_SECONDS = 6.0
 
+# p95 latency is scored in bands, and <= 5 s earns full marks. Escalation costs
+# a second call, so it is only worth taking when the first one was quick enough
+# that both still fit inside the band.
+LATENCY_TARGET_SECONDS = 5.0
+
 TRANSPORT_ERRORS = (
     openai.APIConnectionError,
     openai.APITimeoutError,
@@ -169,6 +174,14 @@ class NoteInterpreter:
             return False
         if not deadline.allows(ESTIMATED_CALL_SECONDS):
             logger.info("skipping escalation: %.1fs left in budget", deadline.remaining)
+            return False
+        if deadline.elapsed * 2 > LATENCY_TARGET_SECONDS:
+            # The second call costs roughly what the first did; if that would
+            # leave the p95 band, keep the first reading.
+            logger.info(
+                "skipping escalation: %.1fs elapsed would exceed the %.0fs latency band",
+                deadline.elapsed, LATENCY_TARGET_SECONDS,
+            )
             return False
         return any(entry.get("confidence") == "low" for entry in entries)
 
