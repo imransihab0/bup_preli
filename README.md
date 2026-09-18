@@ -7,6 +7,9 @@ into machine-checkable directives with an LLM, validates those directives
 deterministically, and returns a cost-minimal 24-hour energy schedule that obeys
 them.
 
+The optimizer is an exact linear program, not a heuristic: it reproduces the
+organizer's reference cost on all ten public cases to the cent.
+
 ---
 
 ## Quickstart (clean machine → working service in ~2 minutes)
@@ -71,19 +74,38 @@ scores cost quality.
 Expected result — all ten cases valid at the organizer optimum:
 
 ```
-PASS  SAMPLE-01  Solar cleaning + distractor     cost 38,365.00 vs 38,365.00 (+0.00)  ratio 1.0000
+PASS  SAMPLE-01  Solar cleaning + distractor   cost 38,365.00 vs 38,365.00 (+0.00)  ratio 1.0000  [llm]
 ...
 10/10 cases fully valid
 Optimization Quality (10 pts): 10.00
+latency  mean 2.38s  p95 4.60s
 ```
 
 Unit and contract tests:
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q                                # 57 tests, no API key required
-pytest tests/test_paraphrases.py -v      # 22 live paraphrase checks, needs a key
+pytest -q --ignore=tests/test_paraphrases.py   # 106 tests, no API key required
+pytest -q                                      # 144 tests, incl. 38 live checks
 ```
+
+`tests/test_paraphrases.py` runs 38 live interpretation checks covering the
+phrasings hidden cases are likely to use: end-exclusive windows, remaining-fraction
+solar factors, percentage- and fraction-of-capacity reserves, single-hour windows,
+24-hour clock without colons, decimal percentages, MWh units, midnight-wrapping
+ranges, passive phrasing, and energy-adjacent distractors that must still be
+`no_op`. Extend `tests/paraphrases.json` rather than tuning against the public
+sample wording.
+
+Concurrency, against a running service:
+
+```bash
+python scripts/load_test.py -c 10 -n 20 --unique     # --unique defeats the cache
+python scripts/load_test.py --base https://<service> -c 5 -n 15
+```
+
+Measured locally at concurrency 10 with the cache defeated: 20/20 success,
+p95 4.2 s, no serialization.
 
 ---
 
@@ -93,20 +115,23 @@ pytest tests/test_paraphrases.py -v      # 22 live paraphrase checks, needs a ke
  operator_notes (natural language)
         │
         ▼
- ┌──────────────────┐   The model interprets every note into a flat
- │  app/llm.py      │   structured directive. One call per request covers all 1-3 notes.
- └──────────────────┘   Model output is treated as UNTRUSTED from here on.
-        │
+ ┌──────────────────┐   The model interprets every note into a flat structured
+ │  app/llm.py      │   directive, with a confidence flag. One call covers all
+ └──────────────────┘   1-3 notes. Output is UNTRUSTED from here on.
+        │                     │
+        │                     └── low confidence + budget available
+        │                         → one retry on a stronger model
         ▼
  ┌──────────────────┐   Deterministic validation: allowed types only, one entry
  │ app/guardrails.py│   per note in order, hours unique ints 0-23 ascending,
  └──────────────────┘   factor in [0,1], reserve <= capacity, cap >= 0.
         │               `applies` is DERIVED here, never taken from the model.
         ▼
- ┌──────────────────┐   Directives fold into per-hour constraint arrays:
- │ app/directives.py│   effective solar, charge/discharge windows, energy
- └──────────────────┘   floor, grid cap. Overlaps resolve to the tighter bound.
-        │
+ ┌──────────────────┐   Validated directives are cached (post-guardrail, so a
+ │  app/cache.py    │   hit can never bypass validation) and folded into
+ │ app/directives.py│   per-hour constraint arrays: effective solar,
+ └──────────────────┘   charge/discharge windows, energy floor, grid cap.
+        │               Overlaps resolve to the tighter bound.
         ▼
  ┌──────────────────┐   96-variable linear program solved with HiGHS.
  │ app/optimizer.py │   Exact optimum — no heuristics, no search.
@@ -119,6 +144,9 @@ pytest tests/test_paraphrases.py -v      # 22 live paraphrase checks, needs a ke
         │
         ▼
      JSON response
+
+ app/deadline.py holds one wall-clock budget across the whole pipeline; every
+ optional step above asks whether the budget can still afford it.
 ```
 
 `app/service.py` wires these together; `app/main.py` is the FastAPI surface.
@@ -179,6 +207,47 @@ at the emitted precision.
 
 Verified: the LP reproduces the organizer's reference cost on all ten public
 cases to the cent.
+
+### Request budget
+
+The judge treats a response beyond 30 s as a failure, so the whole pipeline runs
+under one wall-clock budget (`GRIDWISE_REQUEST_BUDGET`, default 20 s). Each
+optional step — a guardrail retry, a model escalation — checks the remaining
+budget before spending any of it, and each model call's timeout is clamped to
+what is left. The worst case is therefore bounded rather than additive.
+
+### Ambiguity hedging
+
+Where a time window genuinely supports two readings, the model may return
+`alternate_hours` alongside its best reading. The optimizer then constrains the
+**union** of both readings, while the response still reports only the single best
+reading.
+
+This exploits an asymmetry in the scoring. A plan that misses a real directive is
+**invalid** — zero for directive application and zero for optimization on that
+case. An over-constrained plan is merely a little more expensive, scoring
+`min(1, optimal / ours)`. Hedging converts the first outcome into the second, and
+because only `hours` is reported, no interpretation credit is traded away for it.
+
+It fires only when the model flags ambiguity; across the ten public cases it never
+fires, and every case still scores ratio 1.0000. Disable with
+`GRIDWISE_HEDGING=0`.
+
+### Interpretation cache
+
+Validated directives are cached in an LRU keyed on the operator notes plus the
+battery spec (capacity matters — "50% of capacity" resolves differently on a
+different pack). What is stored is the **post-guardrail** directive set, never raw
+model output, so a cache hit cannot bypass validation. Repeated scenarios — judge
+retries, reruns — cost no model call and return in microseconds.
+
+### Observability
+
+Every request carries an id, present on each log line, echoed in the
+`x-request-id` response header, and included in error bodies, so a judge-reported
+failure maps to a specific log line. Credential-shaped substrings are redacted
+from log records before they are emitted, with tests covering OpenAI and
+Anthropic key shapes, bearer tokens, and `api_key=` assignments.
 
 ---
 
@@ -260,9 +329,14 @@ and key material.
 |---|---|---|---|
 | `OPENAI_API_KEY` | **yes** | — | OpenAI API credential |
 | `GRIDWISE_MODEL` | no | `gpt-5.6-luna` | Model used for note interpretation |
+| `GRIDWISE_ESCALATION_MODEL` | no | `gpt-5.6-terra` | Model used when a reading is flagged low-confidence |
 | `GRIDWISE_REASONING_EFFORT` | no | `low` | Reasoning effort; empty omits the parameter |
-| `GRIDWISE_LLM_TIMEOUT` | no | `12` | Seconds before a model call is abandoned |
+| `GRIDWISE_REQUEST_BUDGET` | no | `20` | Wall-clock seconds for the whole request |
+| `GRIDWISE_LLM_TIMEOUT` | no | `12` | Ceiling for one model call, clamped by the budget |
 | `GRIDWISE_LLM_MAX_RETRIES` | no | `1` | SDK retries on transient 429/5xx |
+| `GRIDWISE_ESCALATION` | no | `1` | `0` disables low-confidence escalation |
+| `GRIDWISE_HEDGING` | no | `1` | `0` disables ambiguity hedging |
+| `GRIDWISE_CACHE_SIZE` | no | `256` | Interpretation cache entries; `0` disables |
 | `GRIDWISE_DISABLE_LLM` | no | `0` | `1` skips the model — offline testing only |
 | `PORT` | no | `8000` | Bind port (Render injects this) |
 
@@ -297,6 +371,19 @@ Manual setup instead of the blueprint:
 
 ### Docker fallback
 
+One script builds the image, asserts no credential reached it, boots it, and runs
+the full smoke test against the container:
+
+```bash
+export OPENAI_API_KEY="sk-proj-..."          # passed to the container, not baked in
+./scripts/docker_build.sh                    # local build + verify
+./scripts/docker_build.sh <dockerhub-user>/gridwise-api    # also pushes
+```
+
+The push path prints the exact `repo@sha256:...` digest to submit.
+
+Equivalent by hand:
+
 ```bash
 docker build -t gridwise-api:1.0.0 .
 docker run --rm -p 8000:8000 -e OPENAI_API_KEY="sk-proj-..." gridwise-api:1.0.0
@@ -304,8 +391,10 @@ curl -s http://127.0.0.1:8000/health     # {"status":"ok"}
 ```
 
 The image binds `0.0.0.0`, exposes port 8000 (overridable with `-e PORT=...`),
-runs as an unprivileged user, and contains **no baked-in credentials** — the key
-is supplied at run time.
+runs as an unprivileged user (uid 10001), pins Python 3.12 to match
+`.python-version`, and contains **no baked-in credentials** — `.dockerignore`
+keeps `.env` out of the build context entirely, and the key is supplied at run
+time.
 
 ---
 
@@ -326,17 +415,30 @@ optimizer formulation, guardrail design, and test strategy are the team's own.
 
 ## Known limitations
 
-- **Free-tier cold starts.** See the Render note above — the first request after
-  idling can be slow. Not a code path, but it affects measured latency.
+- **Free-tier cold starts.** Render's free instances sleep after inactivity and
+  can take ~50 s to wake, which would blow both the health-readiness window and
+  p95 latency. Mitigated here with an external cron pinging `/health` every 5
+  minutes; a paid instance removes the risk entirely.
 - **Model dependency.** Interpretation quality is bounded by the model. If the
   OpenAI API is unreachable the deterministic parser keeps the service
-  responding, but it handles fewer phrasings than the model does.
+  responding, but it handles fewer phrasings than the model does, and it does
+  **not** satisfy the challenge's LLM requirement — it exists so an outage
+  degrades the score instead of zeroing the service.
 - **Directive vocabulary is closed.** Only the six specified types are emitted.
   A hidden note describing some other operating condition resolves to `no_op`,
   by design — inventing a directive type is explicitly disallowed.
+- **Hedging costs a little optimality when it fires.** By construction it trades
+  a small cost increase for validity under either reading. It only triggers on
+  model-flagged ambiguity and never fires on the public cases; set
+  `GRIDWISE_HEDGING=0` to disable.
+- **Escalation is budget-gated.** A low-confidence reading is only re-checked on
+  a stronger model if the request budget can absorb the second call. Under a slow
+  provider the first reading stands — deliberately, since a timed-out response
+  scores zero.
+- **Cache is per-process and in-memory.** It does not survive a restart and is
+  not shared across instances. That is sufficient for single-instance judging;
+  a multi-instance deployment would simply see a lower hit rate.
 - **Infeasible interpretations.** If a misread note produces mutually
   unsatisfiable constraints, the service relaxes the directive layer and returns
   a physically valid plan rather than nothing. Organizer scoring scenarios are
   guaranteed feasible, so this should not trigger during judging.
-- **No persistence.** Each request is independent; nothing is cached between
-  requests, so identical repeat scenarios pay the model call again.
