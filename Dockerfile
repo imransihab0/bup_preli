@@ -14,9 +14,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Dependencies first so image rebuilds reuse the layer.
+# Dependencies first so image rebuilds reuse the layer. The generous retry and
+# timeout settings keep the build from dying on a slow or flaky link to PyPI -
+# a plain `pip install` aborts on the first read timeout and loses the layer.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --retries 10 --timeout 120 -r requirements.txt
 
 COPY app ./app
 COPY data ./data

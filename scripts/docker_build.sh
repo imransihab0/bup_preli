@@ -31,15 +31,32 @@ CID=$(docker run -d -p "${PORT}:8000" \
 trap 'docker rm -f "${CID}" >/dev/null 2>&1 || true' EXIT
 
 echo "==> Waiting for /health"
-curl -fsS --retry 45 --retry-delay 1 --retry-connrefused --max-time 90 \
-  "http://127.0.0.1:${PORT}/health"
-echo
+# curl --retry does not retry error 52 (empty reply), which is exactly what a
+# server mid-bind returns, so poll in the shell instead.
+for attempt in $(seq 1 60); do
+  if curl -fsS --max-time 5 "http://127.0.0.1:${PORT}/health" 2>/dev/null; then
+    echo; break
+  fi
+  if [ "$(docker inspect -f '{{.State.Running}}' "${CID}" 2>/dev/null)" != "true" ]; then
+    echo "FAIL: container exited before becoming healthy"
+    docker logs "${CID}" 2>&1 | tail -20
+    exit 1
+  fi
+  [ "${attempt}" = "60" ] && { echo "FAIL: /health never came up"; docker logs "${CID}" 2>&1 | tail -20; exit 1; }
+  sleep 2
+done
 
 echo "==> Running the smoke test against the container"
 ./scripts/smoke_test.sh "http://127.0.0.1:${PORT}"
 
 echo "==> Container healthcheck status"
-docker inspect --format='{{.State.Health.Status}}' "${CID}" || true
+for _ in $(seq 1 15); do
+  status=$(docker inspect --format='{{.State.Health.Status}}' "${CID}" 2>/dev/null || echo unknown)
+  [ "${status}" != "starting" ] && break
+  sleep 3
+done
+echo "    ${status}"
+[ "${status}" = "healthy" ] || { echo "FAIL: container healthcheck reported ${status}"; exit 1; }
 
 if [[ "${IMAGE}" == */* ]]; then
   echo "==> Pushing ${REF}"
